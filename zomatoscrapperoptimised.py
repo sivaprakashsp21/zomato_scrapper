@@ -9,8 +9,16 @@ import time
 scopes = ["https://www.googleapis.com/auth/spreadsheets"]
 creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
 client = gspread.authorize(creds)
-sheet_id = "1qS_5S0zephNVV2FcvwdFlRRDiMhpOGsGhfyzym-Qg_U"
-workbook = client.open_by_key(sheet_id)
+
+# IDs for the sheets
+controller_sheet_id = "1mff16_JEma1sypVjtYPk6YVXPrNanNNDP58a1r5ehhM"
+reviews_sheet_id = "1qS_5S0zephNVV2FcvwdFlRRDiMhpOGsGhfyzym-Qg_U"
+
+# Open the controller sheet
+controller_sheet = client.open_by_key(controller_sheet_id).sheet1
+
+# Open the reviews spreadsheet
+reviews_workbook = client.open_by_key(reviews_sheet_id)
 
 
 def fetch_res_id(restaurant_url):
@@ -31,7 +39,8 @@ def fetch_res_id(restaurant_url):
 def fetch_reviews(res_id, page):
     url = f"https://www.zomato.com/webroutes/reviews/loadMore?sort=dd&filter=reviews-dd&res_id={res_id}&page={page}"
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'}
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
+    }
     response = requests.get(url, headers=headers)
     out = response.json()
     return [
@@ -51,19 +60,19 @@ def dump(restaurant_url):
     res_id = fetch_res_id(restaurant_url)
     if not res_id:
         print("res_id not found.")
-        return None, None
+        return None, None, None
 
-    # Create or open a sheet for this restaurant
+    # Create or open a sheet for this restaurant in the reviews workbook
     try:
-        sheet = workbook.add_worksheet(title=res_id, rows="100", cols="20")
+        sheet = reviews_workbook.add_worksheet(title=res_id, rows="100", cols="20")
     except gspread.exceptions.APIError:
-        sheet = workbook.worksheet(res_id)
+        sheet = reviews_workbook.worksheet(res_id)
         sheet.clear()
 
     headers = ['reviewID', 'userName', 'timestamp', 'reviewText', 'rating', 'dining/delivery type']
     sheet.insert_row(headers, 1)
 
-   
+    # Fetch and insert all reviews
     all_reviews = []
     page = 1
     while True:
@@ -84,24 +93,24 @@ def dump(restaurant_url):
     ] for review in all_reviews]
 
     sheet.append_rows(rows, value_input_option='RAW')
-    latest_review_id = rows[0][0]
-    latest_review_date = rows[0][2]
+    latest_review_id = rows[0][0] if rows else None
+    latest_review_date = rows[0][2] if rows else None
 
-    print(f"Dump complete. Latest review ID: {latest_review_id}, Date: {latest_review_date}")
-    return latest_review_id, latest_review_date
+    print(f"Dump complete for {restaurant_url}. Latest review ID: {latest_review_id}, Date: {latest_review_date}")
+    return latest_review_id, latest_review_date, res_id, len(all_reviews)
 
 
-def incremental(restaurant_url, latest_review_id):
+def incremental(restaurant_url, latest_review_id, current_total_reviews):
     res_id = fetch_res_id(restaurant_url)
     if not res_id:
         print("res_id not found.")
-        return None, None
+        return None, None, 0
 
     try:
-        sheet = workbook.worksheet(res_id)
+        sheet = reviews_workbook.worksheet(res_id)
     except gspread.exceptions.WorksheetNotFound:
         print(f"Sheet for restaurant {res_id} not found.")
-        return None, None
+        return None, None, 0
 
     new_reviews = []
     page = 1
@@ -137,23 +146,29 @@ def incremental(restaurant_url, latest_review_id):
     else:
         print("No new reviews found.")
 
-    return new_latest_review_id, new_latest_review_date
-
+    return new_latest_review_id, new_latest_review_date, len(new_reviews)
 
 
 if __name__ == "__main__":
-    while True:
-        restaurant_url = input("Enter restaurant URL (or 'stop' to end): ")
-        if restaurant_url.lower() == "stop":
-            break
+    # Fetch data from the controller sheet
+    rows = controller_sheet.get_all_records()
 
-        # Full scrape if it's the first time
-        latest_review_id, latest_review_date = dump(restaurant_url)
+    for i, row in enumerate(rows, start=2):
+        restaurant_url = row['Restaurant URL']
+        dump_function = row['Dump Function (Start/Stop)']
+        incremental_function = row['Incremental Function (Start/Stop)']
 
-        while True:
-            choice = input("Check for new reviews? (y/n): ")
-            if choice.lower() != 'y':
-                break
-            latest_review_id, latest_review_date = incremental(restaurant_url, latest_review_id)
-            print(f"Updated latest review ID: {latest_review_id}")
-            print(f"Updated latest review date: {latest_review_date}")
+        if dump_function.lower() == "start":
+            latest_review_id, latest_review_date, res_id, total_reviews = dump(restaurant_url)
+            controller_sheet.update(f"D{i}", [[res_id]])  # Update ResID
+            controller_sheet.update(f"E{i}", [[latest_review_id]])  # Update latest review ID
+            controller_sheet.update(f"F{i}", [[latest_review_date]])  # Update latest review date
+            controller_sheet.update(f"G{i}", [[total_reviews]])  # Update total reviews pulled
+
+        elif incremental_function.lower() == "start":
+            latest_review_id = row['Latest Review ID']
+            current_total_reviews = int(row['Total Reviews Pulled'])
+            latest_review_id, latest_review_date, new_reviews_count = incremental(restaurant_url, latest_review_id, current_total_reviews)
+            controller_sheet.update(f"E{i}", [[latest_review_id]])  # Update latest review ID
+            controller_sheet.update(f"F{i}", [[latest_review_date]])  # Update latest review date
+            controller_sheet.update(f"G{i}", [[current_total_reviews + new_reviews_count]])  # Update total reviews pulled incrementally
