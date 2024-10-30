@@ -6,6 +6,7 @@ import re
 import time
 
 # Google Sheets setup
+
 scopes = ["https://www.googleapis.com/auth/spreadsheets"]
 creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
 client = gspread.authorize(creds)
@@ -62,7 +63,6 @@ def dump(restaurant_url):
         print("res_id not found.")
         return None, None, None
 
-    # Create or open a sheet for this restaurant in the reviews workbook
     try:
         sheet = reviews_workbook.add_worksheet(title=res_id, rows="100", cols="20")
     except gspread.exceptions.APIError:
